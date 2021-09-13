@@ -10,7 +10,7 @@ from sat.items import InfraccionItem, RecordConductorItem
 from urllib.request import *
 
 class RecordConductorSpider(scrapy.Spider):
-    name = 'record_conductor'
+    name = 'multas_de_transito'
     YYYYMMDD_HHMMSS = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def __init__(self, *args, **kwargs):
@@ -22,14 +22,11 @@ class RecordConductorSpider(scrapy.Spider):
         self.sat_record_conductor_url = 'https://www.sat.gob.pe/VirtualSAT/modulos/RecordConductor.aspx'
         self.sat_imagen_url = 'https://www.sat.gob.pe/VirtualSAT'
 
-        self.sat_record_conductor_url = 'https://www.sat.gob.pe/VirtualSAT/modulos/RecordConductor.aspx'
-        self.sat_imagen_url = 'https://www.sat.gob.pe/VirtualSAT'
-
         # INPUT
         dtype = {'DNI': str}
         self.input_df = pd.read_csv(self.in_path+self.filename, sep='\t', usecols=['DNI'], dtype=dtype, encoding='utf8')
 
-        self.filepath_log = f"{self.out_path}record_conductor_{self.filename.split('.')[0]}_log_{self.YYYYMMDD_HHMMSS}.txt"
+        self.filepath_log = f"{self.out_path}multas_de_transito_{self.filename.split('.')[0]}_log_{self.YYYYMMDD_HHMMSS}.txt"
         with open(self.filepath_log, 'wb') as file:
             file.write('dni\tconductor\tfecha_extraccion\testado\n'.encode("utf8"))
     
@@ -49,47 +46,77 @@ class RecordConductorSpider(scrapy.Spider):
                 'dni': row['DNI'],
                 'me': me,
                 'cookiejar': row_idx,
-                'mysession': mysession
+                'mysession': mysession,
+                'reload': True
             }
             yield scrapy.Request(url=url_busqueda, meta=meta, callback=self.parse_with_session, dont_filter=True)
-        
+    
+    # I know that the captcha won't load, so we better do another request in advance
     def parse_with_session(self, response):
+        mysession = response.meta.get('mysession')
         VIEWSTATE = response.xpath("*//input[@id='__VIEWSTATE']/@value").extract_first().strip()
         EVENTVALIDATION = response.xpath("*//input[@id='__EVENTVALIDATION']/@value").extract_first().strip()
         meta = {
             'me': response.meta.get('me'),
             'dni': response.meta.get('dni'),
             'cookiejar': response.meta.get('cookiejar'),
-            'mysession':response.meta.get('mysession'),
+            'mysession': mysession,
             'VIEWSTATE': VIEWSTATE,
             'EVENTVALIDATION': EVENTVALIDATION
         }
-        
+
+        if response.meta.get('reload'):
+            formdata = {
+                'ctl00$cplPrincipal$ucDatosCarrito1$valCantidad': '0',
+                'ctl00$cplPrincipal$ucDatosCarrito1$valMonto': 'S/. 0.00',
+                '__VIEWSTATE': VIEWSTATE,
+                '__EVENTVALIDATION': EVENTVALIDATION,
+                'ctl00$cplPrincipal$txtLicencia': '',
+                'ctl00$cplPrincipal$txtDNI': '',
+                'ctl00$cplPrincipal$txtCaptcha': '',
+                'ctl00$cplPrincipal$CaptchaContinue': 'Buscar',
+                'ctl00$cplPrincipal$hidTipConsulta': 'busqDNI'
+            }
+            url_captcha = f'{self.sat_record_conductor_url}?tri=R&tipoSancion=cond&mysession={mysession}'
+            yield scrapy.FormRequest(url=url_captcha, formdata=formdata, meta=meta, callback=self.parse_captcha, dont_filter=True)
+        else:
+            img_path = response.xpath("//img[@class='captcha_class']/@src").extract_first()
+            full_img = self.sat_imagen_url + img_path[2:]
+            yield scrapy.Request(full_img, meta=meta, callback=self.read_captcha, dont_filter=True)
+
+    def parse_captcha(self, response):
         img_path = response.xpath("//img[@class='captcha_class']/@src").extract_first()
         full_img = self.sat_imagen_url + img_path[2:]
-        yield scrapy.Request(full_img, meta=meta,callback=self.captcha, dont_filter=True)
-        
-    def captcha(self, response):
-        me = response.meta.get('me')
-        dni = response.meta.get('dni')
-        cookNum = response.meta.get('cookiejar')
+        meta = {
+            'me': response.meta.get('me'),
+            'dni': response.meta.get('dni'),
+            'cookiejar': response.meta.get('cookiejar'),
+            'mysession': response.meta.get('mysession'),
+            'VIEWSTATE': response.meta.get('VIEWSTATE'),
+            'EVENTVALIDATION': response.meta.get('EVENTVALIDATION')
+        }
+        yield scrapy.Request(full_img, meta=meta, callback=self.read_captcha, dont_filter=True)
+    
+    def read_captcha(self, response):
         mysession = response.meta.get('mysession')
+        meta = {
+            'me': response.meta.get('me'),
+            'dni': response.meta.get('dni'),
+            'cookiejar': response.meta.get('cookiejar'),
+            'mysession': mysession
+        }
 
         img_bytes = response.body
-        response_firsts = img_bytes[0:18]
-        sentinela = '\r\n\r\n<!DOCTYPE html'.encode("utf-8")
-        if response_firsts==sentinela:
-            captcha = 'XXXX'            
-        else:
-            capturaImagen = Image.open(io.BytesIO(img_bytes))
-            #capturaImagen.save(f"./captcha/{dni}_image_sat.png")
-            ancho,alto = capturaImagen.size
-            captcha = descifrarimagen(capturaImagen, int(ancho), int(alto))
-        
+        capturaImagen = Image.open(io.BytesIO(img_bytes))
+        #capturaImagen.save(f"./captcha/{dni}_image_sat.png")
+        ancho,alto = capturaImagen.size
+        captcha = descifrarimagen(capturaImagen, int(ancho), int(alto))
+
+        mysession = response.meta.get('mysession')
         meta = {
-            'me': me,
-            'dni': dni,
-            'cookiejar': cookNum,
+            'me': response.meta.get('me'),
+            'dni': response.meta.get('dni'),
+            'cookiejar': response.meta.get('cookiejar'),
             'mysession': mysession
         }
 
@@ -99,7 +126,7 @@ class RecordConductorSpider(scrapy.Spider):
             '__VIEWSTATE': response.meta.get('VIEWSTATE'),
             '__EVENTVALIDATION': response.meta.get('EVENTVALIDATION'),
             'ctl00$cplPrincipal$txtLicencia': '',
-            'ctl00$cplPrincipal$txtDNI': dni,
+            'ctl00$cplPrincipal$txtDNI': response.meta.get('dni'),
             'ctl00$cplPrincipal$txtCaptcha': captcha,
             'ctl00$cplPrincipal$CaptchaContinue': 'Buscar',
             'ctl00$cplPrincipal$hidTipConsulta': 'busqDNI'
@@ -107,7 +134,6 @@ class RecordConductorSpider(scrapy.Spider):
 
         url_busqueda = f'{self.sat_record_conductor_url}?tri=R&tipoSancion=cond&mysession={mysession}'
         yield scrapy.FormRequest(url=url_busqueda, formdata=formdata, meta=meta, callback=self.parseFilter, dont_filter=True)
-            
             
     def parseFilter(self,response):
         me = response.meta.get('me')
@@ -123,7 +149,8 @@ class RecordConductorSpider(scrapy.Spider):
                 'me': 'NO',
                 'dni': dni,
                 'cookiejar': cookNum,
-                'mysession': mysession
+                'mysession': mysession,
+                'reload': False
             }
             yield scrapy.Request(url=url_busqueda, meta=meta, callback=self.parse_with_session, dont_filter=True)
         else:
